@@ -1,9 +1,11 @@
+
 import streamlit as st
 import pandas as pd
 
 from renamer import (
     REQUIRED_COLUMNS,
-    validate_database,
+    load_database,
+    find_site_id,
     process_files,
 )
 
@@ -13,12 +15,15 @@ from merger import (
 )
 
 
+# =========================================================
+# PAGE CONFIG
+# =========================================================
+
 st.set_page_config(
     page_title="PDF Renamer & Merger",
     page_icon="📄",
     layout="wide",
 )
-
 
 st.title("📄 PDF Renamer & Merger")
 st.caption(
@@ -27,8 +32,13 @@ st.caption(
 )
 
 
+# =========================================================
+# SIDEBAR
+# =========================================================
+
 with st.sidebar:
     st.header("Workflow")
+
     st.markdown(
         """
         **Step 1 — Rename PDF**
@@ -51,19 +61,31 @@ with st.sidebar:
     )
 
 
-tab_rename, tab_merge = st.tabs([
-    "1️⃣ Rename PDF",
-    "2️⃣ Merge PDF",
-])
+# =========================================================
+# WORKFLOW NAVIGATION
+# =========================================================
+
+workflow = st.radio(
+    "Pilih Workflow",
+    ["1️⃣ Rename PDF", "2️⃣ Merge PDF"],
+    horizontal=True,
+    key="workflow_selection",
+)
+
+st.divider()
 
 
 # =========================================================
-# TAB 1 — RENAME PDF
+# WORKFLOW 1 — RENAME PDF
 # =========================================================
 
-with tab_rename:
+if workflow == "1️⃣ Rename PDF":
 
     st.header("Step 1 — Rename Invoice PDFs")
+
+    # -----------------------------------------------------
+    # UPLOAD EXCEL
+    # -----------------------------------------------------
 
     st.subheader("1. Upload Excel database")
 
@@ -74,6 +96,59 @@ with tab_rename:
         key="excel_upload",
     )
 
+    database = None
+    site_ids = []
+
+    if excel_file is not None:
+
+        try:
+            with st.spinner("Reading Excel database..."):
+
+                database = load_database(excel_file)
+
+            duplicated = (
+                database[
+                    database["_site_norm"].duplicated(keep=False)
+                ]["Site ID"]
+                .drop_duplicates()
+                .tolist()
+            )
+
+            if duplicated:
+
+                st.error(
+                    "Ada Site ID duplikat di Excel. "
+                    "Perbaiki database terlebih dahulu: "
+                    + ", ".join(duplicated[:20])
+                )
+
+                database = None
+
+            else:
+
+                site_ids = database["Site ID"].tolist()
+
+                st.success(
+                    f"Database berhasil dibaca: "
+                    f"{len(database):,} baris."
+                )
+
+                with st.expander("Preview database"):
+
+                    st.dataframe(
+                        database[REQUIRED_COLUMNS].head(20),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+        except Exception as exc:
+
+            st.error(f"Gagal membaca Excel: {exc}")
+
+    # -----------------------------------------------------
+    # UPLOAD PDF
+    # -----------------------------------------------------
+
     st.subheader("2. Upload invoice PDF files")
 
     pdf_files = st.file_uploader(
@@ -83,78 +158,56 @@ with tab_rename:
         key="pdf_upload",
     )
 
-    if excel_file is not None:
+    # -----------------------------------------------------
+    # PREVIEW MATCHING
+    # -----------------------------------------------------
+
+    if database is not None and pdf_files:
 
         try:
-            database = pd.read_excel(
-                excel_file,
-                dtype=str,
-                engine="openpyxl",
-            ).fillna("")
 
-            missing = [
-                col for col in REQUIRED_COLUMNS
-                if col not in database.columns
-            ]
+            preview_rows = []
 
-            if missing:
-                st.error(
-                    "Kolom wajib tidak ditemukan: "
-                    + ", ".join(missing)
+            for pdf in pdf_files:
+
+                detected_site = find_site_id(
+                    pdf.name,
+                    site_ids,
                 )
 
-            else:
-                st.success(
-                    f"Database berhasil dibaca: {len(database):,} baris."
-                )
+                preview_rows.append({
+                    "Original Filename": pdf.name,
+                    "Detected Site ID": (
+                        detected_site or "Tidak terdeteksi"
+                    ),
+                })
 
-                with st.expander("Preview database"):
-                    st.dataframe(
-                        database[REQUIRED_COLUMNS].head(20),
-                        use_container_width=True,
-                    )
+            preview_df = pd.DataFrame(preview_rows)
 
-        except Exception as exc:
-            st.error(f"Gagal membaca Excel: {exc}")
+            st.subheader("3. File preview")
 
-    if excel_file is not None and pdf_files:
+            st.dataframe(
+                preview_df,
+                use_container_width=True,
+                hide_index=True,
+            )
 
-        try:
-            excel_file.seek(0)
-            validation = validate_database(excel_file)
+            st.caption(
+                "Output format: Invoice Proposal_PO Number.pdf"
+            )
 
-            if validation["ok"]:
+            # -------------------------------------------------
+            # PROCESS RENAME
+            # -------------------------------------------------
 
-                preview_rows = []
+            if st.button(
+                "🚀 Process & Rename PDFs",
+                type="primary",
+                use_container_width=True,
+                key="rename_button",
+            ):
 
-                for pdf in pdf_files:
-                    preview_rows.append({
-                        "Original Filename": pdf.name,
-                        "Detected Site ID": validation[
-                            "preview_match"
-                        ](pdf.name),
-                    })
-
-                preview_df = pd.DataFrame(preview_rows)
-
-                st.subheader("3. File preview")
-
-                st.dataframe(
-                    preview_df,
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                st.caption(
-                    "Output format: Invoice Proposal_PO Number.pdf"
-                )
-
-                if st.button(
-                    "🚀 Process & Rename PDFs",
-                    type="primary",
-                    use_container_width=True,
-                    key="rename_button",
-                ):
+                try:
 
                     with st.spinner("Renaming PDF files..."):
 
@@ -169,67 +222,74 @@ with tab_rename:
                         st.session_state["renamer_log"] = log_df
                         st.session_state["renamer_summary"] = summary
 
-                if "renamer_summary" in st.session_state:
+                except Exception as exc:
 
-                    summary = st.session_state["renamer_summary"]
+                    st.error(f"Rename process failed: {exc}")
 
-                    st.subheader("4. Rename result")
+            # -------------------------------------------------
+            # RENAME RESULT
+            # -------------------------------------------------
 
-                    col1, col2, col3 = st.columns(3)
+            if "renamer_summary" in st.session_state:
 
-                    col1.metric("Total PDF", summary["total"])
-                    col2.metric(
-                        "Successfully renamed",
-                        summary["renamed"],
-                    )
-                    col3.metric(
-                        "Need attention",
-                        summary["issues"],
-                    )
+                summary = st.session_state["renamer_summary"]
 
-                    st.dataframe(
-                        st.session_state["renamer_log"],
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+                st.subheader("4. Rename result")
 
-                    st.download_button(
-                        "⬇️ Download renamed PDFs (ZIP)",
-                        data=st.session_state["renamer_zip"],
-                        file_name="renamed_pdfs.zip",
-                        mime="application/zip",
-                        type="primary",
-                        use_container_width=True,
-                        key="download_rename_zip",
-                    )
+                col1, col2, col3 = st.columns(3)
 
-                    rename_log_bytes = (
-                        st.session_state["renamer_log"]
-                        .to_csv(index=False)
-                        .encode("utf-8-sig")
-                    )
+                col1.metric("Total PDF", summary["total"])
 
-                    st.download_button(
-                        "⬇️ Download rename log (CSV)",
-                        data=rename_log_bytes,
-                        file_name="rename_log.csv",
-                        mime="text/csv",
-                        key="download_rename_log",
-                    )
+                col2.metric(
+                    "Successfully renamed",
+                    summary["renamed"],
+                )
 
-            else:
-                for error in validation["errors"]:
-                    st.error(error)
+                col3.metric(
+                    "Need attention",
+                    summary["issues"],
+                )
+
+                st.dataframe(
+                    st.session_state["renamer_log"],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.download_button(
+                    "⬇️ Download renamed PDFs (ZIP)",
+                    data=st.session_state["renamer_zip"],
+                    file_name="renamed_pdfs.zip",
+                    mime="application/zip",
+                    type="primary",
+                    use_container_width=True,
+                    key="download_rename_zip",
+                )
+
+                rename_log_bytes = (
+                    st.session_state["renamer_log"]
+                    .to_csv(index=False)
+                    .encode("utf-8-sig")
+                )
+
+                st.download_button(
+                    "⬇️ Download rename log (CSV)",
+                    data=rename_log_bytes,
+                    file_name="rename_log.csv",
+                    mime="text/csv",
+                    key="download_rename_log",
+                )
 
         except Exception as exc:
+
             st.error(f"Rename validation failed: {exc}")
 
 
 # =========================================================
-# TAB 2 — MERGE PDF
+# WORKFLOW 2 — MERGE PDF
 # =========================================================
 
-with tab_merge:
+elif workflow == "2️⃣ Merge PDF":
 
     st.header("Step 2 — Merge Invoice with PO")
 
@@ -237,6 +297,10 @@ with tab_merge:
         "Upload the ZIP generated from Step 1, "
         "or upload the extracted renamed PDFs individually."
     )
+
+    # -----------------------------------------------------
+    # UPLOAD RENAMED INVOICES
+    # -----------------------------------------------------
 
     st.subheader("1. Upload renamed invoice files")
 
@@ -254,6 +318,10 @@ with tab_merge:
         key="renamed_pdf_upload",
     )
 
+    # -----------------------------------------------------
+    # UPLOAD PO
+    # -----------------------------------------------------
+
     st.subheader("2. Upload PO PDF files")
 
     po_files = st.file_uploader(
@@ -267,6 +335,10 @@ with tab_merge:
         renamed_zip is not None
         or bool(renamed_pdf_files)
     )
+
+    # -----------------------------------------------------
+    # PROCESS MERGE
+    # -----------------------------------------------------
 
     if has_invoices and po_files:
 
@@ -289,6 +361,7 @@ with tab_merge:
         ):
 
             try:
+
                 with st.spinner(
                     "Matching PO files and merging PDF documents..."
                 ):
@@ -307,30 +380,54 @@ with tab_merge:
                     st.session_state["merge_log_excel"] = log_excel
 
             except Exception as exc:
+
                 st.error(f"Merge process failed: {exc}")
 
     elif not has_invoices:
+
         st.warning(
             "Upload ZIP hasil rename atau PDF hasil rename terlebih dahulu."
         )
 
     elif not po_files:
+
         st.warning("Upload kumpulan PDF PO terlebih dahulu.")
+
+    # -----------------------------------------------------
+    # MERGE RESULT
+    # -----------------------------------------------------
 
     if "merge_summary" in st.session_state:
 
         summary = st.session_state["merge_summary"]
 
         st.divider()
+
         st.subheader("3. Merge processing result")
 
         col1, col2, col3, col4, col5 = st.columns(5)
 
         col1.metric("Total Invoice", summary["total"])
-        col2.metric("Successfully Merged", summary["merged"])
-        col3.metric("PO Not Found", summary["missing"])
-        col4.metric("Duplicate PO", summary["duplicate"])
-        col5.metric("Errors", summary["errors"])
+
+        col2.metric(
+            "Successfully Merged",
+            summary["merged"],
+        )
+
+        col3.metric(
+            "PO Not Found",
+            summary["missing"],
+        )
+
+        col4.metric(
+            "Duplicate PO",
+            summary["duplicate"],
+        )
+
+        col5.metric(
+            "Errors",
+            summary["errors"],
+        )
 
         st.subheader("Processing log")
 
@@ -343,6 +440,7 @@ with tab_merge:
         col1, col2 = st.columns(2)
 
         with col1:
+
             st.download_button(
                 "⬇️ Download Final PDFs (ZIP)",
                 data=st.session_state["merge_zip"],
@@ -354,6 +452,7 @@ with tab_merge:
             )
 
         with col2:
+
             st.download_button(
                 "⬇️ Download Merge Log (Excel)",
                 data=st.session_state["merge_log_excel"],
@@ -366,6 +465,10 @@ with tab_merge:
                 key="download_merge_log",
             )
 
+
+# =========================================================
+# FOOTER
+# =========================================================
 
 st.divider()
 
